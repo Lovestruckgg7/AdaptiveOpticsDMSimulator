@@ -1,0 +1,174 @@
+import bpy
+import bmesh
+import math
+import numpy as np
+
+def simulate_light_path(beam, dm, detector):
+    """
+    Simulates the light path from the beam to the deformable mirror (DM) and then to the detector.
+
+    Parameters:
+        beam: The light beam object.
+        dm: The deformable mirror object.
+        detector: The detector object.
+
+    Returns:
+        The point of intersection on the detector or None if no hit occurs.
+    """
+    start = beam.data.splines[0].bezier_points[0].co
+    end = beam.data.splines[0].bezier_points[1].co
+    beam_dir = (end - start).normalized()
+    
+    hit, hit_point, _, _ = dm.ray_cast(start, beam_dir)
+    if hit:
+        normal = dm.closest_point_on_mesh(hit_point)[1]
+        reflection = beam_dir - 2 * beam_dir.dot(normal) * normal
+        beam.data.splines[0].bezier_points[1].co = hit_point
+        
+        det_hit, det_hit_point, _, _ = detector.ray_cast(hit_point, reflection)
+        if det_hit:
+            return det_hit_point
+    return None
+
+def deform_dm(dm, deformation_function):
+ 
+    for vertex in dm.data.vertices:
+        x, y = vertex.co.xy
+        z = deformation_function(x, y)
+        vertex.co.z += z
+
+def measure_wavefront(beam, detector):
+    """
+    Measure the wavefront by detecting the intersection of the beam on the detector.
+
+    Parameters:
+        beam: The light beam object.
+        detector: The detector object.
+
+    Returns:
+        The detected wavefront or None if no hit occurs.
+    """
+    beam_dir = beam.data.splines[0].bezier_points[1].co - beam.data.splines[0].bezier_points[0].co
+    hit, location, _, _ = detector.ray_cast(beam.data.splines[0].bezier_points[0].co, beam_dir)
+    if hit:
+        return location - beam.data.splines[0].bezier_points[0].co
+    return None
+
+    
+
+def create_interaction_matrix(dm, detector, beam):
+    """
+    Creates an interaction matrix for the deformable mirror.
+
+    Parameters:
+        dm: The deformable mirror object
+        detector: The detector object
+        beam: The light beam object
+
+    Returns:
+        A matrix repping response of the detector to each actuators deformation
+    """
+    num_actuators = len(dm.data.vertices)
+    interaction_matrix = np.zeros((num_actuators, 3))
+    
+    for i, vertex in enumerate(dm.data.vertices):
+        original_z = vertex.co.z
+        vertex.co.z += 0.01  # Small perturbation
+        dm.data.update()
+        bpy.context.view_layer.update()
+        
+        wavefront = measure_wavefront(beam, detector)
+        if wavefront is not None:
+            interaction_matrix[i] = wavefront
+        vertex.co.z = original_z  # Restore original position
+    
+    return interaction_matrix
+
+def calibrate_dm(dm, beam, detector, interaction_matrix, target_wavefront, steps=10):
+   
+    for step in range(steps):
+        current_wavefront = measure_wavefront(beam, detector)
+        if current_wavefront is None:
+            break
+        
+        error = target_wavefront - current_wavefront
+        adjustments = np.linalg.lstsq(interaction_matrix, error, rcond=None)[0]
+        
+        for i, vertex in enumerate(dm.data.vertices):
+            vertex.co.z += adjustments[i] / steps
+        dm.data.update()
+        bpy.context.view_layer.update()
+        
+        print(f"Step {step + 1}/{steps}:")
+        print(f"  Current wavefront: {current_wavefront}")
+        print(f"  Error: {error}")
+        print(f"  Max adjustment: {np.max(np.abs(adjustments))}")
+
+# Main simulation pipeline
+beams = [obj for obj in bpy.data.objects if obj.name.startswith("Beam")]
+dm = bpy.data.objects["DM"]
+detector = bpy.data.objects["Detector"]
+
+# Simulate initial light paths
+initial_intersections = []
+for beam in beams:
+    intersection = simulate_light_path(beam, dm, detector)
+    if intersection:
+        initial_intersections.append(intersection)
+
+# Define the deformation function
+def deformation_function(x, y):
+    return 0.1 * math.sin(5 * x) * math.cos(5 * y)
+
+# Apply deformation
+print("Applying deformation to DM...")
+deform_dm(dm, deformation_function)
+dm.data.update()
+
+# light paths --> deformation (after)
+deformed_intersections = []
+for beam in beams:
+    intersection = simulate_light_path(beam, dm, detector)
+    if intersection:
+        deformed_intersections.append(intersection)
+
+# Create interaction matrix
+interaction_matrix = create_interaction_matrix(dm, detector, beams[0])
+
+# Define the target wavefront (e.g., undisturbed planar wavefront)
+target_wavefront = np.array([0, 0, 1])
+
+# Calibrate the deformable mirror
+print("Starting calibration...")
+calibrate_dm(dm, beams[0], detector, interaction_matrix, target_wavefront)
+
+# Simulate light paths after calibration
+calibrated_intersections = []
+for beam in beams:
+    intersection = simulate_light_path(beam, dm, detector)
+    if intersection:
+        calibrated_intersections.append(intersection)
+
+# Print results
+print("Simulation Results:")
+print(f"Initial intersections: {initial_intersections}")
+print(f"Deformed intersections: {deformed_intersections}")
+print(f"Calibrated intersections: {calibrated_intersections}")
+
+
+
+if "dm_deformed" not in globals():
+    dm_deformed = False  
+
+# Original deformation function
+def deformation_function(x, y):
+    return 0.1 * math.sin(5 * x) * math.cos(5 * y)
+
+# Deform the DM
+def deform_dm(dm, deformation):
+    for vertex in dm.data.vertices:
+        x, y = vertex.co.xy
+        z = deformation(x, y)
+        vertex.co.z += z
+    dm.data.update()
+    print("DM deformed.")
